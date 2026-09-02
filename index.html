@@ -192,10 +192,16 @@
     display:flex; justify-content:space-between; align-items:baseline;
     margin:8px 2px 2px; color:var(--text-muted); font-size:12.5px;
   }
+  .board-hint{
+    text-align:center; color:var(--text-muted); font-size:11.5px;
+    margin:6px 2px 0;
+  }
   .row{
     display:flex; align-items:center; gap:12px;
     background:var(--surface); border:1px solid var(--border);
     border-radius:16px; padding:12px 14px;
+    -webkit-touch-callout:none; -webkit-user-select:none; user-select:none;
+    touch-action:pan-y;
   }
   .row.me{ border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
   .rank{
@@ -314,6 +320,7 @@
   }
   .btn.primary{ background:var(--accent); color:#fff; }
   .btn.ghost{ background:var(--surface-2); color:var(--text); }
+  .btn.danger{ background:#B4483C; color:#fff; }
   .lightbox-img{ max-width:100%; max-height:80vh; border-radius:12px; }
   .lightbox-close{
     position:absolute; top:18px; right:18px; width:38px; height:38px; border-radius:50%;
@@ -370,7 +377,8 @@
     switching: false,
     cleanup: null,
     cleaning: false,
-    lightbox: null
+    lightbox: null,
+    deleteTarget: null
   };
 
   function firstOfMonthStr(){
@@ -490,6 +498,11 @@
           // Locks in a finished month's winners permanently, once.
           archiveMonth: function(monthKey, winners){
             return db.collection("monthlyWinners").doc(monthKey).set({ month: monthKey, winners: winners, finalizedAt: Date.now() });
+          },
+          // Removes someone from the active roster only. Their past checkins,
+          // photos, and any already-archived monthly wins are untouched.
+          deleteMember: function(memberId){
+            return db.collection("members").doc(memberId).delete();
           }
         });
       } catch (e){
@@ -529,6 +542,11 @@
         mem.monthlyWinners.push({ id: monthKey, month: monthKey, winners: winners, finalizedAt: Date.now() });
         pushWinners();
         return Promise.resolve();
+      },
+      deleteMember: function(memberId){
+        mem.members = mem.members.filter(function(m){ return m.id !== memberId; });
+        pushMembers();
+        return Promise.resolve();
       }
     };
   }
@@ -551,12 +569,15 @@
     Object.keys(monthsWithData).forEach(function(k){
       if (archived[k]) return;
       var counts = {};
+      var namesByMember = {};
       state.checkins.forEach(function(c){
-        if (monthKeyOf(c.createdAt) === k) counts[c.memberId] = (counts[c.memberId] || 0) + 1;
+        if (monthKeyOf(c.createdAt) === k){
+          counts[c.memberId] = (counts[c.memberId] || 0) + 1;
+          namesByMember[c.memberId] = c.name; // each checkin already carries its own name snapshot,
+        }                                     // so this stays correct even after the member is deleted later.
       });
       var entries = Object.keys(counts).map(function(mid){
-        var m = state.members.filter(function(x){ return x.id === mid; })[0];
-        return { id: mid, name: m ? m.name : "탈퇴한 멤버", count: counts[mid] };
+        return { id: mid, name: namesByMember[mid] || "탈퇴한 멤버", count: counts[mid] };
       });
       if (!entries.length) return;
       // Take the top TOP_SCORE_GROUPS distinct scores; everyone sharing one of
@@ -680,6 +701,53 @@
   function cancelCheckin(){
     state.pendingPhoto = null;
     render();
+  }
+
+  function requestDeleteMember(memberId, memberName){
+    state.deleteTarget = { id: memberId, name: memberName };
+    render();
+  }
+
+  function cancelDeleteMember(){
+    state.deleteTarget = null;
+    render();
+  }
+
+  function confirmDeleteMember(){
+    if (!state.deleteTarget) return;
+    var target = state.deleteTarget;
+    state.deleteTarget = null;
+    render();
+    state.dataLayer.deleteMember(target.id);
+    // If this device belonged to the removed member, syncCurrentUser() will
+    // send it back to the onboarding screen as soon as the next members
+    // snapshot arrives (their id no longer matches anyone in the roster).
+  }
+
+  // Touch/mouse "press and hold" — used on leaderboard rows to reveal the
+  // delete action without cluttering the row with a visible button.
+  function bindLongPress(el, onLongPress){
+    var LONG_PRESS_MS = 550;
+    var MOVE_CANCEL_PX = 12;
+    var timer = null, startX = 0, startY = 0;
+    function clear(){ if (timer){ clearTimeout(timer); timer = null; } }
+    el.addEventListener("pointerdown", function(e){
+      startX = e.clientX; startY = e.clientY;
+      clear();
+      timer = setTimeout(function(){
+        timer = null;
+        if (navigator.vibrate){ try { navigator.vibrate(15); } catch(err){} }
+        onLongPress();
+      }, LONG_PRESS_MS);
+    });
+    el.addEventListener("pointermove", function(e){
+      if (!timer) return;
+      if (Math.abs(e.clientX - startX) > MOVE_CANCEL_PX || Math.abs(e.clientY - startY) > MOVE_CANCEL_PX) clear();
+    });
+    el.addEventListener("pointerup", clear);
+    el.addEventListener("pointerleave", clear);
+    el.addEventListener("pointercancel", clear);
+    el.addEventListener("contextmenu", function(e){ e.preventDefault(); });
   }
 
   function openCleanup(){
@@ -869,6 +937,19 @@
           '</div>' +
         '</div>';
     }
+    if (state.deleteTarget){
+      modals += '' +
+        '<div class="overlay" id="deleteMemberOverlay">' +
+          '<div class="sheet">' +
+            '<h3>' + escapeHtml(state.deleteTarget.name) + '님을 삭제할까요?</h3>' +
+            '<p class="cleanup-note">이번 달 리더보드에서만 빠져요. 지난 기록과 인증 사진은 그대로 남아요. 다시 참여하려면 새 이름으로 등록해야 해요.</p>' +
+            '<div class="sheet-actions">' +
+              '<button class="btn ghost" id="deleteMemberCancel">취소</button>' +
+              '<button class="btn danger" id="deleteMemberConfirm">삭제하기</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    }
 
     return sharedNote + header + cta + tabs + '<section class="view">' + body + '</section>' + modals;
   }
@@ -880,6 +961,7 @@
     var totalDays = daysInMonthKey(monthKeyOf(Date.now()));
 
     var meta = '<div class="board-meta"><span>' + currentMonthLabel() + ' 인증 횟수 기준</span><span>총 ' + rows.length + '명</span></div>';
+    var hint = '<div class="board-hint">이름을 길게 누르면 멤버를 삭제할 수 있어요</div>';
 
     var list = rows.map(function(r, idx){
       var rank = idx + 1;
@@ -888,7 +970,7 @@
       var medal = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : rank;
       var pct = Math.max(4, Math.round((r.count / top) * 100));
       return '' +
-        '<div class="' + rowClass + '">' +
+        '<div class="' + rowClass + '" data-member-row="' + escapeHtml(r.id) + '" data-member-name="' + escapeHtml(r.name) + '">' +
           '<div class="rank' + rankClass + '">' + medal + '</div>' +
           '<div class="row-main">' +
             '<div class="row-name">' + escapeHtml(r.name) + (r.id === state.currentUser.id ? '<span class="you-tag">나</span>' : '') + '</div>' +
@@ -898,7 +980,7 @@
         '</div>';
     }).join("");
 
-    return meta + list;
+    return meta + list + hint;
   }
 
   function renderHistory(){
@@ -1000,6 +1082,16 @@
     if (cleanupCancel) cleanupCancel.addEventListener("click", closeCleanup);
     var cleanupConfirm = document.getElementById("cleanupConfirm");
     if (cleanupConfirm) cleanupConfirm.addEventListener("click", runCleanup);
+
+    document.querySelectorAll("[data-member-row]").forEach(function(row){
+      var memberId = row.getAttribute("data-member-row");
+      var memberName = row.getAttribute("data-member-name");
+      bindLongPress(row, function(){ requestDeleteMember(memberId, memberName); });
+    });
+    var deleteMemberCancel = document.getElementById("deleteMemberCancel");
+    if (deleteMemberCancel) deleteMemberCancel.addEventListener("click", cancelDeleteMember);
+    var deleteMemberConfirm = document.getElementById("deleteMemberConfirm");
+    if (deleteMemberConfirm) deleteMemberConfirm.addEventListener("click", confirmDeleteMember);
   }
 
   /* ---------------- boot ---------------- */
