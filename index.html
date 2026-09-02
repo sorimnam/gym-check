@@ -957,7 +957,6 @@
   function renderBoard(){
     var rows = computeLeaderboard();
     if (!rows.length) return '<div class="empty">아직 등록된 멤버가 없어요.</div>';
-    var top = rows[0].count || 1;
     var totalDays = daysInMonthKey(monthKeyOf(Date.now()));
 
     var meta = '<div class="board-meta"><span>' + currentMonthLabel() + ' 인증 횟수 기준</span><span>총 ' + rows.length + '명</span></div>';
@@ -968,7 +967,7 @@
       var rankClass = rank === 1 ? " r1" : rank === 2 ? " r2" : rank === 3 ? " r3" : "";
       var rowClass = "row" + rankClass + (r.id === state.currentUser.id ? " me" : "");
       var medal = rank === 1 ? "🥇" : rank === 2 ? "🥈" : rank === 3 ? "🥉" : rank;
-      var pct = Math.max(4, Math.round((r.count / top) * 100));
+      var pct = Math.max(4, Math.round((r.count / totalDays) * 100));
       return '' +
         '<div class="' + rowClass + '" data-member-row="' + escapeHtml(r.id) + '" data-member-name="' + escapeHtml(r.name) + '">' +
           '<div class="rank' + rankClass + '">' + medal + '</div>' +
