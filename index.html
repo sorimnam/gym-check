@@ -344,6 +344,7 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
+<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignal.js" defer></script>
 <script>
 (function(){
   "use strict";
@@ -357,6 +358,19 @@
     messagingSenderId: "707146969983",
     appId: "1:707146969983:web:2a0fbaba9288113c35604a"
   };
+
+  // ---- Your OneSignal push app info (from onesignal.com > Settings > Keys & IDs) ----
+  // Leave both blank until you've signed up for OneSignal — the app works fine without
+  // push notifications, they just stay off until these are filled in.
+  var ONESIGNAL_APP_ID = "b2440f9c-99e1-41e4-8933-b5158104f027";
+  var ONESIGNAL_REST_API_KEY = "os_v2_app_wjca7hez4fa6jcjtwukycbhqe7vohiby3ooekgvu6fw2dw57z5wyx6phjh3y5kiqk35qb4eyrm7pf5mfff4b6cmhfhwwhfu3kj267iy";
+
+  window.OneSignalDeferred = window.OneSignalDeferred || [];
+  if (ONESIGNAL_APP_ID){
+    window.OneSignalDeferred.push(function(OneSignal){
+      OneSignal.init({ appId: ONESIGNAL_APP_ID });
+    });
+  }
 
   var STORAGE_KEY = "workoutScoreboard.memberId";
   var MAX_MEMBERS = 10;
@@ -601,6 +615,52 @@
     } else {
       state.currentUser = null;
     }
+    pushSyncIdentity();
+  }
+
+  /* ---------------- push notifications (OneSignal) ---------------- */
+
+  // Tags this device with its member id so a checkin push can target
+  // "everyone except the person who just checked in".
+  function pushSyncIdentity(){
+    if (!ONESIGNAL_APP_ID || !state.currentUser) return;
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    window.OneSignalDeferred.push(function(OneSignal){
+      OneSignal.login(state.currentUser.id).catch(function(){});
+      OneSignal.User.addTag("memberId", state.currentUser.id).catch(function(){});
+    });
+  }
+
+  function requestPushPermission(){
+    if (!ONESIGNAL_APP_ID){
+      alert("알림 기능이 아직 설정되지 않았어요.");
+      return;
+    }
+    window.OneSignalDeferred = window.OneSignalDeferred || [];
+    window.OneSignalDeferred.push(function(OneSignal){
+      OneSignal.Notifications.requestPermission();
+    });
+  }
+
+  // Best-effort push to every other subscribed device when someone checks in.
+  // Silently does nothing until ONESIGNAL_APP_ID/REST_API_KEY are filled in.
+  function notifyCheckin(name, memberId){
+    if (!ONESIGNAL_APP_ID || !ONESIGNAL_REST_API_KEY) return;
+    fetch("https://onesignal.com/api/v1/notifications", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": "Key " + ONESIGNAL_REST_API_KEY
+      },
+      body: JSON.stringify({
+        app_id: ONESIGNAL_APP_ID,
+        headings: { en: "운동 인증 완료 🏋️" },
+        contents: { en: name + "님이 방금 인증했어요!" },
+        filters: [
+          { field: "tag", key: "memberId", relation: "!=", value: memberId }
+        ]
+      })
+    }).catch(function(){ /* best-effort; ignore network errors */ });
   }
 
   /* ---------------- image capture + compression ---------------- */
@@ -688,12 +748,15 @@
   function confirmCheckin(){
     if (!state.pendingPhoto || !state.currentUser) return;
     var photo = state.pendingPhoto;
+    var memberId = state.currentUser.id;
+    var memberName = state.currentUser.name;
     state.pendingPhoto = null;
     state.uploading = true;
     render();
-    state.dataLayer.checkIn(state.currentUser.id, state.currentUser.name, photo).then(function(){
+    state.dataLayer.checkIn(memberId, memberName, photo).then(function(){
       state.uploading = false;
       state.tab = "board";
+      notifyCheckin(memberName, memberId);
       render();
     });
   }
@@ -872,6 +935,7 @@
         '<div class="brand"><div class="eyebrow">Family Gym Log</div><h1>출석 스코어보드</h1></div>' +
         '<div class="header-actions">' +
           '<button class="icon-btn" id="cleanupBtn" title="지난 사진 정리" aria-label="지난 사진 정리">🧹</button>' +
+          '<button class="icon-btn" id="notifyBtn" title="알림 켜기" aria-label="알림 켜기">🔔</button>' +
           '<button class="whoami" id="switchBtn"><span class="avatar">' + escapeHtml(initials(state.currentUser.name)) + '</span>' + escapeHtml(state.currentUser.name) + '</button>' +
         '</div>' +
       '</div>';
@@ -1072,6 +1136,8 @@
 
     var cleanupBtn = document.getElementById("cleanupBtn");
     if (cleanupBtn) cleanupBtn.addEventListener("click", openCleanup);
+    var notifyBtn = document.getElementById("notifyBtn");
+    if (notifyBtn) notifyBtn.addEventListener("click", requestPushPermission);
     var cleanupDateInput = document.getElementById("cleanupDateInput");
     if (cleanupDateInput) cleanupDateInput.addEventListener("change", function(){
       state.cleanup.date = cleanupDateInput.value;
