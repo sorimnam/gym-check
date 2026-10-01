@@ -259,6 +259,45 @@
   .meal-slot-empty.locked{ cursor:default; opacity:0.5; }
   .meal-slot-label{ font-size:10.5px; color:var(--text-muted); font-weight:600; text-align:center; }
 
+  /* ---------- meal calendar ---------- */
+  .meal-cal{ display:flex; flex-direction:column; gap:10px; }
+  .meal-cal-header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:2px 4px;
+  }
+  .meal-cal-month{
+    font-family:"Big Shoulders Display", sans-serif; font-weight:800; font-size:18px;
+  }
+  .meal-cal-nav{
+    width:32px; height:32px; border-radius:10px; border:none; background:var(--surface-2);
+    color:var(--text); font-size:18px; cursor:pointer;
+  }
+  .meal-cal-grid{
+    display:grid; grid-template-columns:repeat(7,1fr); gap:4px;
+  }
+  .meal-cal-weekdays{ margin-bottom:-2px; }
+  .meal-cal-weekday{
+    text-align:center; font-size:11px; color:var(--text-muted); font-weight:600; padding:4px 0;
+  }
+  .meal-cal-cell{
+    aspect-ratio:1/1; border-radius:12px; background:var(--surface);
+    border:1px solid var(--border); display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:2px; cursor:pointer; color:var(--text); font-size:13px; font-weight:600;
+  }
+  .meal-cal-cell.empty{ visibility:hidden; cursor:default; border:none; background:none; }
+  .meal-cal-cell.today{ border-color:var(--accent); color:var(--accent-strong); }
+  .meal-cal-dot{ width:5px; height:5px; border-radius:50%; background:var(--accent); }
+  .meal-cal-cell.has-data .meal-cal-daynum{ color:var(--accent-strong); }
+
+  .meal-day-bar{ display:flex; align-items:center; gap:10px; padding:2px 2px 4px; }
+  .meal-back-btn{
+    border:none; background:var(--surface-2); color:var(--text);
+    padding:6px 12px; border-radius:10px; font-size:13px; font-weight:600; cursor:pointer;
+  }
+  .meal-day-label{
+    font-family:"Big Shoulders Display", sans-serif; font-weight:800; font-size:18px;
+  }
+
   /* ---------- feed (photos by day) ---------- */
   .feed-day{ display:flex; flex-direction:column; gap:8px; }
   .feed-day-label{
@@ -328,6 +367,34 @@
   .lightbox-close{
     position:absolute; top:18px; right:18px; width:38px; height:38px; border-radius:50%;
     background:rgba(255,255,255,0.15); color:#fff; border:none; font-size:18px; cursor:pointer;
+    z-index:1;
+  }
+  .lightbox-panel{
+    width:100%; max-width:440px; max-height:86vh; overflow:hidden;
+    background:var(--surface); border-radius:20px; display:flex; flex-direction:column;
+    box-shadow:var(--shadow);
+  }
+  .lightbox-panel .lightbox-img{ max-height:50vh; width:100%; object-fit:cover; border-radius:0; }
+  .comment-list{
+    padding:12px 14px; display:flex; flex-direction:column; gap:8px;
+    overflow-y:auto; max-height:26vh;
+  }
+  .comment-item{ display:flex; gap:6px; font-size:13.5px; line-height:1.4; }
+  .comment-author{ font-weight:700; flex-shrink:0; }
+  .comment-text{ color:var(--text); word-break:break-word; }
+  .comment-empty{ color:var(--text-muted); font-size:12.5px; text-align:center; padding:8px 0; }
+  .comment-form{
+    display:flex; gap:8px; padding:10px 14px 14px; border-top:1px solid var(--border);
+  }
+  .comment-input{
+    flex:1; min-width:0; padding:10px 14px; border-radius:999px; border:1.5px solid var(--border);
+    background:var(--bg); color:var(--text); font-size:14px;
+  }
+  .comment-input:focus{ border-color:var(--accent); }
+  .comment-submit{
+    width:40px; height:40px; border-radius:50%; border:none; background:var(--accent);
+    color:#fff; font-size:16px; cursor:pointer; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center;
   }
   .spinner{
     width:16px; height:16px; border-radius:50%;
@@ -384,6 +451,10 @@
     pendingPhoto: null,
     pendingMealSlot: null,
     pendingMeal: null,
+    mealCalendarMonth: monthKeyOf(Date.now()),
+    mealSelectedDay: null,
+    mealComments: [],
+    commentDraft: "",
     uploading: false,
     switching: false,
     cleanup: null,
@@ -420,6 +491,12 @@
     var y = parseInt(parts[0], 10);
     var m = parseInt(parts[1], 10);
     return new Date(y, m, 0).getDate();
+  }
+
+  function shiftMonthKey(key, delta){
+    var parts = key.split("-").map(Number);
+    var d = new Date(parts[0], parts[1] - 1 + delta, 1);
+    return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0");
   }
 
   function dayKeyOf(ts){
@@ -488,6 +565,11 @@
           render();
         }, function(){});
 
+        db.collection("mealComments").orderBy("createdAt","asc").onSnapshot(function(snap){
+          state.mealComments = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
+          render();
+        }, function(){});
+
         resolve({
           addMember: function(name){
             return db.collection("members").add({ name: name, joinedAt: Date.now() }).then(function(ref){ return ref.id; });
@@ -508,6 +590,10 @@
             var id = memberId + "_" + dayKey + "_" + slot;
             return db.collection("meals").doc(id).set({ memberId: memberId, name: name, slot: slot, photo: photo, dayKey: dayKey, createdAt: Date.now() });
           },
+          // A comment left on a specific meal photo, by its deterministic meal doc id.
+          addComment: function(mealId, authorId, authorName, text){
+            return db.collection("mealComments").add({ mealId: mealId, authorId: authorId, authorName: authorName, text: text, createdAt: Date.now() });
+          },
           // Removes someone from the active roster only. Their past checkins,
           // photos, and meal records are untouched.
           deleteMember: function(memberId){
@@ -524,11 +610,12 @@
     // Used only if the Firebase SDK fails to load (offline, blocked, bad config).
     // Not synced with other family members — this device only, for this visit.
     state.isShared = false;
-    var mem = { members: [], checkins: [], meals: [] };
+    var mem = { members: [], checkins: [], meals: [], mealComments: [] };
     function pushMembers(){ state.members = mem.members.slice(); syncCurrentUser(); render(); }
     function pushCheckins(){ state.checkins = mem.checkins.slice().sort(function(a,b){ return b.createdAt - a.createdAt; }); render(); }
     function pushMeals(){ state.meals = mem.meals.slice(); render(); }
-    pushMembers(); pushCheckins(); pushMeals();
+    function pushComments(){ state.mealComments = mem.mealComments.slice().sort(function(a,b){ return a.createdAt - b.createdAt; }); render(); }
+    pushMembers(); pushCheckins(); pushMeals(); pushComments();
     return {
       addMember: function(name){
         var id = "local-" + Math.random().toString(36).slice(2,9);
@@ -554,6 +641,11 @@
         var doc = { id: id, memberId: memberId, name: name, slot: slot, photo: photo, dayKey: dayKey, createdAt: Date.now() };
         if (idx === -1) mem.meals.push(doc); else mem.meals[idx] = doc;
         pushMeals();
+        return Promise.resolve();
+      },
+      addComment: function(mealId, authorId, authorName, text){
+        mem.mealComments.push({ id: "cm-" + Math.random().toString(36).slice(2,9), mealId: mealId, authorId: authorId, authorName: authorName, text: text, createdAt: Date.now() });
+        pushComments();
         return Promise.resolve();
       },
       deleteMember: function(memberId){
@@ -705,6 +797,16 @@
     state.pendingMeal = null;
     render();
     state.dataLayer.addMeal(memberId, memberName, slot, photo, dayKey);
+  }
+
+  function addMealComment(){
+    if (!state.lightbox || typeof state.lightbox !== "object" || !state.currentUser) return;
+    var text = (state.commentDraft || "").trim();
+    if (!text) return;
+    var mealId = state.lightbox.mealId;
+    state.commentDraft = "";
+    render();
+    state.dataLayer.addComment(mealId, state.currentUser.id, state.currentUser.name, text);
   }
 
   function requestDeleteMember(memberId, memberName){
@@ -899,7 +1001,7 @@
       '<div class="tabs">' +
         '<button class="tab' + (state.tab === "board" ? " active" : "") + '" data-tab="board">리더보드</button>' +
         '<button class="tab' + (state.tab === "meal" ? " active" : "") + '" data-tab="meal">식단인증</button>' +
-        '<button class="tab' + (state.tab === "feed" ? " active" : "") + '" data-tab="feed">인증 사진</button>' +
+        '<button class="tab' + (state.tab === "feed" ? " active" : "") + '" data-tab="feed">운동인증</button>' +
       '</div>';
 
     var body = state.tab === "board" ? renderBoard() : state.tab === "meal" ? renderMealTab() : renderFeed();
@@ -933,11 +1035,34 @@
         '</div>';
     }
     if (state.lightbox){
-      modals += '' +
-        '<div class="overlay center" id="lightboxOverlay" style="position:relative;">' +
-          '<button class="lightbox-close" id="lightboxClose" aria-label="닫기">✕</button>' +
-          '<img class="lightbox-img" src="' + state.lightbox + '" alt="운동 인증 사진 확대" />' +
-        '</div>';
+      var isMealLightbox = typeof state.lightbox === "object" && state.lightbox !== null;
+      if (isMealLightbox){
+        var lbMealId = state.lightbox.mealId;
+        var comments = state.mealComments.filter(function(c){ return c.mealId === lbMealId; });
+        var commentList = comments.length
+          ? comments.map(function(c){
+              return '<div class="comment-item"><span class="comment-author">' + escapeHtml(c.authorName) + '</span><span class="comment-text">' + escapeHtml(c.text) + '</span></div>';
+            }).join("")
+          : '<div class="comment-empty">첫 댓글을 남겨보세요</div>';
+        modals += '' +
+          '<div class="overlay center" id="lightboxOverlay" style="position:relative;">' +
+            '<button class="lightbox-close" id="lightboxClose" aria-label="닫기">✕</button>' +
+            '<div class="lightbox-panel">' +
+              '<img class="lightbox-img" src="' + state.lightbox.photo + '" alt="식단 인증 사진 확대" />' +
+              '<div class="comment-list">' + commentList + '</div>' +
+              '<div class="comment-form">' +
+                '<input type="text" id="commentInput" class="comment-input" placeholder="댓글 남기기" value="' + escapeHtml(state.commentDraft) + '" maxlength="80" />' +
+                '<button class="comment-submit" id="commentSubmit" aria-label="댓글 등록">➤</button>' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+      } else {
+        modals += '' +
+          '<div class="overlay center" id="lightboxOverlay" style="position:relative;">' +
+            '<button class="lightbox-close" id="lightboxClose" aria-label="닫기">✕</button>' +
+            '<img class="lightbox-img" src="' + state.lightbox + '" alt="운동 인증 사진 확대" />' +
+          '</div>';
+      }
     }
     if (state.cleanup){
       var cutoffTs = new Date(state.cleanup.date + "T00:00:00").getTime();
@@ -1003,22 +1128,69 @@
 
   function renderMealTab(){
     if (!state.members.length) return '<div class="empty">아직 등록된 멤버가 없어요.</div>';
+    if (state.mealSelectedDay) return renderMealDay(state.mealSelectedDay);
+    return renderMealCalendar();
+  }
 
+  function renderMealCalendar(){
+    var monthKey = state.mealCalendarMonth;
+    var totalDays = daysInMonthKey(monthKey);
+    var parts = monthKey.split("-").map(Number);
+    var firstWeekday = new Date(parts[0], parts[1]-1, 1).getDay();
     var todayKey = dayKeyOf(Date.now());
-    var map = {};
-    state.meals.forEach(function(m){
-      if (m.dayKey === todayKey) map[m.memberId + "|" + m.slot] = m;
-    });
 
-    var meta = '<div class="board-meta"><span>오늘의 식단 인증</span><span>총 ' + state.members.length + '명</span></div>';
+    var daysWithData = {};
+    state.meals.forEach(function(m){ daysWithData[m.dayKey] = true; });
+
+    var header = '' +
+      '<div class="meal-cal-header">' +
+        '<button class="meal-cal-nav" data-meal-cal-prev aria-label="이전 달">‹</button>' +
+        '<span class="meal-cal-month">' + monthLabel(monthKey) + '</span>' +
+        '<button class="meal-cal-nav" data-meal-cal-next aria-label="다음 달">›</button>' +
+      '</div>';
+
+    var weekdays = ["일","월","화","수","목","금","토"];
+    var weekdayRow = '<div class="meal-cal-grid meal-cal-weekdays">' +
+      weekdays.map(function(w){ return '<div class="meal-cal-weekday">' + w + '</div>'; }).join("") +
+      '</div>';
+
+    var cells = [];
+    for (var i=0; i<firstWeekday; i++) cells.push('<div class="meal-cal-cell empty"></div>');
+    for (var d=1; d<=totalDays; d++){
+      var dayKey = monthKey + "-" + String(d).padStart(2,"0");
+      var isToday = dayKey === todayKey;
+      var hasData = !!daysWithData[dayKey];
+      cells.push(
+        '<button class="meal-cal-cell' + (isToday ? ' today' : '') + (hasData ? ' has-data' : '') + '" data-meal-day="' + dayKey + '">' +
+          '<span class="meal-cal-daynum">' + d + '</span>' +
+          (hasData ? '<span class="meal-cal-dot"></span>' : '') +
+        '</button>'
+      );
+    }
+    var grid = '<div class="meal-cal-grid">' + cells.join("") + '</div>';
+
+    return '<div class="meal-cal">' + header + weekdayRow + grid + '</div>';
+  }
+
+  function renderMealDay(dayKey){
+    var map = {};
+    state.meals.forEach(function(m){ if (m.dayKey === dayKey) map[m.memberId + "|" + m.slot] = m; });
+
+    var isTodaySelected = dayKey === dayKeyOf(Date.now());
+    var backBar = '' +
+      '<div class="meal-day-bar">' +
+        '<button class="meal-back-btn" data-meal-back>‹ 달력</button>' +
+        '<span class="meal-day-label">' + dayLabel(dayKey) + '</span>' +
+      '</div>';
 
     var cards = state.members.map(function(m){
       var isMe = m.id === state.currentUser.id;
+      var canEdit = isMe && isTodaySelected;
       var slots = MEAL_SLOTS.map(function(s){
         var meal = map[m.id + "|" + s.key];
         var cell = meal
-          ? '<img class="meal-slot-photo" src="' + meal.photo + '" alt="' + escapeHtml(m.name) + ' ' + s.label + ' 인증 사진" data-lightbox="1" />'
-          : (isMe
+          ? '<img class="meal-slot-photo" src="' + meal.photo + '" alt="' + escapeHtml(m.name) + ' ' + s.label + ' 인증 사진" data-meal-lightbox="' + escapeHtml(meal.id) + '" />'
+          : (canEdit
               ? '<div class="meal-slot-empty" data-meal-slot="' + s.key + '" role="button" aria-label="' + s.label + ' 사진 추가">+</div>'
               : '<div class="meal-slot-empty locked">·</div>');
         return '<div class="meal-slot">' + cell + '<span class="meal-slot-label">' + s.emoji + ' ' + s.label + '</span></div>';
@@ -1030,7 +1202,7 @@
         '</div>';
     }).join("");
 
-    return meta + cards;
+    return backBar + cards;
   }
 
   function renderFeed(){
@@ -1084,6 +1256,27 @@
         if (mealFileInput) mealFileInput.click();
       });
     });
+    document.querySelectorAll("[data-meal-day]").forEach(function(cell){
+      cell.addEventListener("click", function(){
+        state.mealSelectedDay = cell.getAttribute("data-meal-day");
+        render();
+      });
+    });
+    var mealBackBtn = document.querySelector("[data-meal-back]");
+    if (mealBackBtn) mealBackBtn.addEventListener("click", function(){
+      state.mealSelectedDay = null;
+      render();
+    });
+    var mealCalPrev = document.querySelector("[data-meal-cal-prev]");
+    if (mealCalPrev) mealCalPrev.addEventListener("click", function(){
+      state.mealCalendarMonth = shiftMonthKey(state.mealCalendarMonth, -1);
+      render();
+    });
+    var mealCalNext = document.querySelector("[data-meal-cal-next]");
+    if (mealCalNext) mealCalNext.addEventListener("click", function(){
+      state.mealCalendarMonth = shiftMonthKey(state.mealCalendarMonth, 1);
+      render();
+    });
     var mealCancelBtn = document.getElementById("mealCancelBtn");
     if (mealCancelBtn) mealCancelBtn.addEventListener("click", cancelMealCheckin);
     var mealConfirmBtn = document.getElementById("mealConfirmBtn");
@@ -1101,10 +1294,24 @@
     document.querySelectorAll("[data-lightbox]").forEach(function(img){
       img.addEventListener("click", function(){ state.lightbox = img.getAttribute("src"); render(); });
     });
+    document.querySelectorAll("[data-meal-lightbox]").forEach(function(img){
+      img.addEventListener("click", function(){
+        state.lightbox = { photo: img.getAttribute("src"), mealId: img.getAttribute("data-meal-lightbox") };
+        state.commentDraft = "";
+        render();
+      });
+    });
     var lbClose = document.getElementById("lightboxClose");
-    if (lbClose) lbClose.addEventListener("click", function(){ state.lightbox = null; render(); });
+    if (lbClose) lbClose.addEventListener("click", function(){ state.lightbox = null; state.commentDraft = ""; render(); });
     var lbOverlay = document.getElementById("lightboxOverlay");
-    if (lbOverlay) lbOverlay.addEventListener("click", function(e){ if (e.target === lbOverlay){ state.lightbox = null; render(); } });
+    if (lbOverlay) lbOverlay.addEventListener("click", function(e){ if (e.target === lbOverlay){ state.lightbox = null; state.commentDraft = ""; render(); } });
+    var commentInput = document.getElementById("commentInput");
+    if (commentInput){
+      commentInput.addEventListener("input", function(){ state.commentDraft = commentInput.value; });
+      commentInput.addEventListener("keydown", function(e){ if (e.key === "Enter") addMealComment(); });
+    }
+    var commentSubmit = document.getElementById("commentSubmit");
+    if (commentSubmit) commentSubmit.addEventListener("click", addMealComment);
 
     var cleanupBtn = document.getElementById("cleanupBtn");
     if (cleanupBtn) cleanupBtn.addEventListener("click", openCleanup);
