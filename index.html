@@ -71,8 +71,10 @@
     --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 12px 28px -14px rgba(0,0,0,0.6);
   }
 
-  *{box-sizing:border-box;}
-  html,body{margin:0;padding:0; overflow-x:hidden; max-width:100%; }
+  *{box-sizing:border-box; min-width:0;}
+  html,body{margin:0;padding:0; overflow-x:hidden; max-width:100vw; width:100%; }
+  input,textarea,button,select{min-width:0; max-width:100%;}
+  img,svg{min-width:0; max-width:100%; display:block;}
   body{
     background:var(--bg);
     color:var(--text);
@@ -260,11 +262,12 @@
   .meal-slot-empty.locked{ cursor:default; opacity:0.5; }
   .meal-slot-label{ font-size:10.5px; color:var(--text-muted); font-weight:600; text-align:center; }
   .meal-slot-text{
-    width:100%; aspect-ratio:1/1; border-radius:12px; border:1px solid var(--border);
+    width:100%; min-width:0; aspect-ratio:1/1; border-radius:12px; border:1px solid var(--border);
     background:var(--surface-2); color:var(--text); font-size:10px; font-weight:600;
     padding:6px; overflow:hidden; display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical;
-    line-height:1.3; text-align:center;
+    line-height:1.3; text-align:center; word-break:break-word; overflow-wrap:anywhere;
   }
+  .meal-slot-text.editable{ cursor:pointer; border-style:dashed; border-color:var(--accent); }
   .meal-text-input{
     width:100%; min-height:90px; padding:12px 14px; border-radius:14px;
     border:1.5px solid var(--border); background:var(--surface); color:var(--text);
@@ -387,10 +390,26 @@
     overflow-y:auto; max-height:18vh;
     padding-top:4px; border-top:1px solid var(--border);
   }
-  .comment-item{ display:flex; gap:6px; font-size:13px; line-height:1.4; }
+  .comment-item{ display:flex; gap:6px; font-size:13px; line-height:1.4; align-items:baseline; }
   .comment-author{ font-weight:700; flex-shrink:0; }
-  .comment-text{ color:var(--text); word-break:break-word; }
+  .comment-text{ color:var(--text); word-break:break-word; overflow-wrap:anywhere; }
+  .comment-edited{ color:var(--text-muted); font-size:11px; }
+  .comment-edit-btn{
+    border:none; background:none; color:var(--text-muted); font-size:11px;
+    cursor:pointer; padding:0; margin-left:auto; flex-shrink:0; text-decoration:underline;
+  }
   .comment-empty{ color:var(--text-muted); font-size:12px; text-align:center; padding:4px 0; }
+  .comment-item.editing{ align-items:center; }
+  .comment-edit-input{
+    flex:1; min-width:0; padding:6px 10px; border-radius:999px; border:1.5px solid var(--accent);
+    background:var(--bg); color:var(--text); font-size:13px;
+  }
+  .comment-edit-save, .comment-edit-cancel{
+    width:26px; height:26px; border-radius:50%; border:none; font-size:12px; cursor:pointer;
+    flex-shrink:0; display:flex; align-items:center; justify-content:center;
+  }
+  .comment-edit-save{ background:var(--accent); color:#fff; }
+  .comment-edit-cancel{ background:var(--surface-2); color:var(--text); }
   .comment-form{ display:flex; gap:8px; }
   .comment-input{
     flex:1; min-width:0; padding:10px 14px; border-radius:999px; border:1.5px solid var(--border);
@@ -463,6 +482,8 @@
     pendingMealText: null,
     mealComments: [],
     commentDrafts: {},
+    editingCommentId: null,
+    editingCommentText: "",
     uploading: false,
     switching: false,
     cleanup: null,
@@ -606,6 +627,9 @@
           addComment: function(entryId, authorId, authorName, text){
             return db.collection("mealComments").add({ entryId: entryId, authorId: authorId, authorName: authorName, text: text, createdAt: Date.now() });
           },
+          updateComment: function(commentId, text){
+            return db.collection("mealComments").doc(commentId).update({ text: text, editedAt: Date.now() });
+          },
           // Removes someone from the active roster only. Their past checkins,
           // photos, and meal records are untouched.
           deleteMember: function(memberId){
@@ -658,6 +682,12 @@
       },
       addComment: function(entryId, authorId, authorName, text){
         mem.mealComments.push({ id: "cm-" + Math.random().toString(36).slice(2,9), entryId: entryId, authorId: authorId, authorName: authorName, text: text, createdAt: Date.now() });
+        pushComments();
+        return Promise.resolve();
+      },
+      updateComment: function(commentId, text){
+        var c = mem.mealComments.filter(function(x){ return x.id === commentId; })[0];
+        if (c){ c.text = text; c.editedAt = Date.now(); }
         pushComments();
         return Promise.resolve();
       },
@@ -856,6 +886,36 @@
     state.commentDrafts[entryId] = "";
     render();
     state.dataLayer.addComment(entryId, state.currentUser.id, state.currentUser.name, text);
+  }
+
+  function openMealTextEdit(slot){
+    if (!state.currentUser) return;
+    var dayKey = dayKeyOf(Date.now());
+    var id = state.currentUser.id + "_" + dayKey + "_" + slot;
+    var existing = state.meals.filter(function(m){ return m.id === id; })[0];
+    state.pendingMealText = { slot: slot, text: (existing && existing.kind === "text") ? (existing.text || "") : "" };
+    render();
+  }
+
+  function startEditComment(commentId, currentText){
+    state.editingCommentId = commentId;
+    state.editingCommentText = currentText || "";
+    render();
+  }
+
+  function cancelEditComment(){
+    state.editingCommentId = null;
+    state.editingCommentText = "";
+    render();
+  }
+
+  function saveEditComment(commentId){
+    var text = (state.editingCommentText || "").trim();
+    if (!text) return;
+    state.editingCommentId = null;
+    state.editingCommentText = "";
+    render();
+    state.dataLayer.updateComment(commentId, text);
   }
 
   function requestDeleteMember(memberId, memberName){
@@ -1244,7 +1304,10 @@
         var meal = map[m.id + "|" + s.key];
         var cell;
         if (meal && meal.kind === "text"){
-          cell = '<div class="meal-slot-text" title="' + escapeHtml(meal.text || "") + '">' + escapeHtml(meal.text || "") + '</div>';
+          cell = '<div class="meal-slot-text' + (canEdit ? ' editable' : '') + '"' +
+            (canEdit ? ' data-meal-edit-text="' + s.key + '" role="button" aria-label="' + s.label + ' 수정"' : '') +
+            ' title="' + escapeHtml(meal.text || "") + (canEdit ? " (탭하여 수정)" : "") + '">' +
+            escapeHtml(meal.text || "") + '</div>';
         } else if (meal){
           cell = '<img class="meal-slot-photo" src="' + meal.photo + '" alt="' + escapeHtml(m.name) + ' ' + s.label + ' 인증 사진" data-lightbox="1" />';
         } else if (canEdit){
@@ -1259,7 +1322,21 @@
       var cardComments = state.mealComments.filter(function(c){ return c.entryId === entryId; });
       var commentListHtml = cardComments.length
         ? cardComments.map(function(c){
-            return '<div class="comment-item"><span class="comment-author">' + escapeHtml(c.authorName) + '</span><span class="comment-text">' + escapeHtml(c.text) + '</span></div>';
+            if (state.editingCommentId === c.id){
+              return '' +
+                '<div class="comment-item editing">' +
+                  '<input type="text" class="comment-edit-input" data-comment-edit-input="' + escapeHtml(c.id) + '" value="' + escapeHtml(state.editingCommentText) + '" maxlength="80" />' +
+                  '<button class="comment-edit-save" data-comment-edit-save="' + escapeHtml(c.id) + '" aria-label="댓글 저장">✓</button>' +
+                  '<button class="comment-edit-cancel" data-comment-edit-cancel aria-label="댓글 수정 취소">✕</button>' +
+                '</div>';
+            }
+            var isAuthor = state.currentUser && c.authorId === state.currentUser.id;
+            return '' +
+              '<div class="comment-item">' +
+                '<span class="comment-author">' + escapeHtml(c.authorName) + '</span>' +
+                '<span class="comment-text">' + escapeHtml(c.text) + (c.editedAt ? ' <span class="comment-edited">(수정됨)</span>' : '') + '</span>' +
+                (isAuthor ? '<button class="comment-edit-btn" data-comment-edit="' + escapeHtml(c.id) + '" aria-label="댓글 수정">수정</button>' : '') +
+              '</div>';
           }).join("")
         : '<div class="comment-empty">댓글을 남겨보세요</div>';
       var draft = state.commentDrafts[entryId] || "";
@@ -1406,6 +1483,32 @@
     document.querySelectorAll("[data-comment-submit]").forEach(function(btn){
       var entryId = btn.getAttribute("data-comment-submit");
       btn.addEventListener("click", function(){ submitComment(entryId); });
+    });
+
+    document.querySelectorAll("[data-meal-edit-text]").forEach(function(cell){
+      cell.addEventListener("click", function(){
+        openMealTextEdit(cell.getAttribute("data-meal-edit-text"));
+      });
+    });
+
+    document.querySelectorAll("[data-comment-edit]").forEach(function(btn){
+      var commentId = btn.getAttribute("data-comment-edit");
+      btn.addEventListener("click", function(){
+        var c = state.mealComments.filter(function(x){ return x.id === commentId; })[0];
+        startEditComment(commentId, c ? c.text : "");
+      });
+    });
+    document.querySelectorAll("[data-comment-edit-input]").forEach(function(input){
+      var commentId = input.getAttribute("data-comment-edit-input");
+      input.addEventListener("input", function(){ state.editingCommentText = input.value; });
+      input.addEventListener("keydown", function(e){ if (e.key === "Enter") saveEditComment(commentId); });
+    });
+    document.querySelectorAll("[data-comment-edit-save]").forEach(function(btn){
+      var commentId = btn.getAttribute("data-comment-edit-save");
+      btn.addEventListener("click", function(){ saveEditComment(commentId); });
+    });
+    document.querySelectorAll("[data-comment-edit-cancel]").forEach(function(btn){
+      btn.addEventListener("click", cancelEditComment);
     });
 
     var cleanupBtn = document.getElementById("cleanupBtn");
