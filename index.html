@@ -237,24 +237,27 @@
     background:var(--surface); border:1px dashed var(--border); border-radius:16px;
   }
 
-  /* ---------- history (monthly winners) ---------- */
-  .history-month{ display:flex; flex-direction:column; gap:8px; }
-  .history-month-label{
-    font-family:"Big Shoulders Display", sans-serif; font-weight:800; font-size:18px;
-    padding:6px 2px 0;
-  }
-  .history-card{
-    display:flex; align-items:center; gap:12px;
+  /* ---------- meal tracking ---------- */
+  .meal-card{
     background:var(--surface); border:1px solid var(--border);
-    border-radius:16px; padding:12px 14px;
+    border-radius:16px; padding:14px; display:flex; flex-direction:column; gap:10px;
   }
-  .history-card .rank{ width:34px; height:34px; }
-  .history-winner-name{ font-weight:700; font-size:15px; flex:1; }
-  .history-count{
-    font-family:"JetBrains Mono", monospace; font-variant-numeric:tabular-nums;
-    font-weight:600; font-size:14px; color:var(--text-muted);
+  .meal-member-name{ font-weight:700; font-size:14.5px; display:flex; align-items:center; gap:6px; }
+  .meal-slots{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+  .meal-slot{ display:flex; flex-direction:column; align-items:center; gap:4px; }
+  .meal-slot-photo{
+    width:100%; aspect-ratio:1/1; object-fit:cover; border-radius:12px;
+    background:var(--surface-2); cursor:zoom-in; display:block; border:1px solid var(--border);
   }
-  .history-tie-note{ font-size:11.5px; color:var(--text-muted); margin-left:2px; }
+  .meal-slot-empty{
+    width:100%; aspect-ratio:1/1; border-radius:12px;
+    border:1.5px dashed var(--border); background:var(--surface-2);
+    display:flex; align-items:center; justify-content:center;
+    color:var(--text-muted); font-size:20px; font-weight:600;
+    cursor:pointer;
+  }
+  .meal-slot-empty.locked{ cursor:default; opacity:0.5; }
+  .meal-slot-label{ font-size:10.5px; color:var(--text-muted); font-weight:600; text-align:center; }
 
   /* ---------- feed (photos by day) ---------- */
   .feed-day{ display:flex; flex-direction:column; gap:8px; }
@@ -344,7 +347,6 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore-compat.js"></script>
-<script src="https://cdn.onesignal.com/sdks/web/v16/OneSignal.js" defer></script>
 <script>
 (function(){
   "use strict";
@@ -359,34 +361,29 @@
     appId: "1:707146969983:web:2a0fbaba9288113c35604a"
   };
 
-  // ---- Your OneSignal push app info (from onesignal.com > Settings > Keys & IDs) ----
-  // Leave both blank until you've signed up for OneSignal — the app works fine without
-  // push notifications, they just stay off until these are filled in.
-  var ONESIGNAL_APP_ID = "b2440f9c-99e1-41e4-8933-b5158104f027";
-  var ONESIGNAL_REST_API_KEY = "os_v2_app_wjca7hez4fa6jcjtwukycbhqe7vohiby3ooekgvu6fw2dw57z5wyx6phjh3y5kiqk35qb4eyrm7pf5mfff4b6cmhfhwwhfu3kj267iy";
-
-  window.OneSignalDeferred = window.OneSignalDeferred || [];
-  if (ONESIGNAL_APP_ID){
-    window.OneSignalDeferred.push(function(OneSignal){
-      OneSignal.init({ appId: ONESIGNAL_APP_ID });
-    });
-  }
-
   var STORAGE_KEY = "workoutScoreboard.memberId";
   var MAX_MEMBERS = 10;
-  var TOP_SCORE_GROUPS = 2; // show the top-2 distinct scores; every member sharing a score is included
+
+  var MEAL_SLOTS = [
+    { key: "breakfast", label: "아침", emoji: "🌅" },
+    { key: "lunch", label: "점심", emoji: "☀️" },
+    { key: "dinner", label: "저녁", emoji: "🌙" },
+    { key: "snack", label: "간식", emoji: "🍪" }
+  ];
 
   var state = {
     dataLayer: null,
     isShared: null,
     members: [],
     checkins: [],
-    monthlyWinners: [],
+    meals: [],
     currentUser: null,
     tab: "board",
     joinName: "",
     joinError: "",
     pendingPhoto: null,
+    pendingMealSlot: null,
+    pendingMeal: null,
     uploading: false,
     switching: false,
     cleanup: null,
@@ -478,19 +475,16 @@
         db.collection("members").onSnapshot(function(snap){
           state.members = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
           syncCurrentUser();
-          finalizePastMonths();
           render();
         }, function(){ /* degrade silently; UI keeps last known state */ });
 
         db.collection("checkins").orderBy("createdAt","desc").onSnapshot(function(snap){
           state.checkins = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
-          finalizePastMonths();
           render();
         }, function(){});
 
-        db.collection("monthlyWinners").orderBy("month","desc").onSnapshot(function(snap){
-          state.monthlyWinners = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
-          finalizePastMonths();
+        db.collection("meals").onSnapshot(function(snap){
+          state.meals = snap.docs.map(function(d){ return Object.assign({ id: d.id }, d.data()); });
           render();
         }, function(){});
 
@@ -501,20 +495,21 @@
           checkIn: function(memberId, name, photo){
             return db.collection("checkins").add({ memberId: memberId, name: name, photo: photo, createdAt: Date.now() });
           },
-          // Deletes photo records older than beforeTs. Never touches monthlyWinners,
-          // so already-archived past winners survive the cleanup. The cleanup UI caps
-          // the date at the start of the current month, so this-month standings are safe too.
+          // Deletes photo records older than beforeTs. The cleanup UI caps the date
+          // at the start of the current month, so this-month standings are safe too.
           deleteCheckinsBefore: function(beforeTs){
             var toDelete = state.checkins.filter(function(c){ return c.createdAt < beforeTs; });
             return Promise.all(toDelete.map(function(c){ return db.collection("checkins").doc(c.id).delete(); }))
               .then(function(){ return toDelete.length; });
           },
-          // Locks in a finished month's winners permanently, once.
-          archiveMonth: function(monthKey, winners){
-            return db.collection("monthlyWinners").doc(monthKey).set({ month: monthKey, winners: winners, finalizedAt: Date.now() });
+          // One meal photo per member/day/slot — a deterministic doc id means
+          // uploading again for the same slot just overwrites it.
+          addMeal: function(memberId, name, slot, photo, dayKey){
+            var id = memberId + "_" + dayKey + "_" + slot;
+            return db.collection("meals").doc(id).set({ memberId: memberId, name: name, slot: slot, photo: photo, dayKey: dayKey, createdAt: Date.now() });
           },
           // Removes someone from the active roster only. Their past checkins,
-          // photos, and any already-archived monthly wins are untouched.
+          // photos, and meal records are untouched.
           deleteMember: function(memberId){
             return db.collection("members").doc(memberId).delete();
           }
@@ -529,11 +524,11 @@
     // Used only if the Firebase SDK fails to load (offline, blocked, bad config).
     // Not synced with other family members — this device only, for this visit.
     state.isShared = false;
-    var mem = { members: [], checkins: [], monthlyWinners: [] };
+    var mem = { members: [], checkins: [], meals: [] };
     function pushMembers(){ state.members = mem.members.slice(); syncCurrentUser(); render(); }
-    function pushCheckins(){ state.checkins = mem.checkins.slice().sort(function(a,b){ return b.createdAt - a.createdAt; }); finalizePastMonths(); render(); }
-    function pushWinners(){ state.monthlyWinners = mem.monthlyWinners.slice().sort(function(a,b){ return b.month.localeCompare(a.month); }); render(); }
-    pushMembers(); pushCheckins(); pushWinners();
+    function pushCheckins(){ state.checkins = mem.checkins.slice().sort(function(a,b){ return b.createdAt - a.createdAt; }); render(); }
+    function pushMeals(){ state.meals = mem.meals.slice(); render(); }
+    pushMembers(); pushCheckins(); pushMeals();
     return {
       addMember: function(name){
         var id = "local-" + Math.random().toString(36).slice(2,9);
@@ -552,9 +547,13 @@
         pushCheckins();
         return Promise.resolve(before - mem.checkins.length);
       },
-      archiveMonth: function(monthKey, winners){
-        mem.monthlyWinners.push({ id: monthKey, month: monthKey, winners: winners, finalizedAt: Date.now() });
-        pushWinners();
+      addMeal: function(memberId, name, slot, photo, dayKey){
+        var id = memberId + "_" + dayKey + "_" + slot;
+        var idx = -1;
+        mem.meals.forEach(function(m, i){ if (m.id === id) idx = i; });
+        var doc = { id: id, memberId: memberId, name: name, slot: slot, photo: photo, dayKey: dayKey, createdAt: Date.now() };
+        if (idx === -1) mem.meals.push(doc); else mem.meals[idx] = doc;
+        pushMeals();
         return Promise.resolve();
       },
       deleteMember: function(memberId){
@@ -563,47 +562,6 @@
         return Promise.resolve();
       }
     };
-  }
-
-  // Ranks a finished month's checkins and locks in the top-scoring members
-  // (ties fully included) for any past month that isn't archived yet. Runs on
-  // every checkins/monthlyWinners update, so it self-heals whenever anyone has
-  // the app open — there is no server-side clock to fire this at month-end.
-  function finalizePastMonths(){
-    if (!state.dataLayer) return;
-    var currentMonthKey = monthKeyOf(Date.now());
-    var monthsWithData = {};
-    state.checkins.forEach(function(c){
-      var k = monthKeyOf(c.createdAt);
-      if (k < currentMonthKey) monthsWithData[k] = true;
-    });
-    var archived = {};
-    state.monthlyWinners.forEach(function(w){ archived[w.month] = true; });
-
-    Object.keys(monthsWithData).forEach(function(k){
-      if (archived[k]) return;
-      var counts = {};
-      var namesByMember = {};
-      state.checkins.forEach(function(c){
-        if (monthKeyOf(c.createdAt) === k){
-          counts[c.memberId] = (counts[c.memberId] || 0) + 1;
-          namesByMember[c.memberId] = c.name; // each checkin already carries its own name snapshot,
-        }                                     // so this stays correct even after the member is deleted later.
-      });
-      var entries = Object.keys(counts).map(function(mid){
-        return { id: mid, name: namesByMember[mid] || "탈퇴한 멤버", count: counts[mid] };
-      });
-      if (!entries.length) return;
-      // Take the top TOP_SCORE_GROUPS distinct scores; everyone sharing one of
-      // those scores is a winner, so a tie never gets cut off mid-group.
-      var uniqueCounts = [];
-      entries.forEach(function(e){ if (uniqueCounts.indexOf(e.count) === -1) uniqueCounts.push(e.count); });
-      uniqueCounts.sort(function(a,b){ return b - a; });
-      var topCounts = uniqueCounts.slice(0, TOP_SCORE_GROUPS);
-      var winners = entries.filter(function(e){ return topCounts.indexOf(e.count) !== -1; });
-      archived[k] = true; // prevent re-archiving while the write is in flight
-      state.dataLayer.archiveMonth(k, winners);
-    });
   }
 
   function syncCurrentUser(){
@@ -615,52 +573,6 @@
     } else {
       state.currentUser = null;
     }
-    pushSyncIdentity();
-  }
-
-  /* ---------------- push notifications (OneSignal) ---------------- */
-
-  // Tags this device with its member id so a checkin push can target
-  // "everyone except the person who just checked in".
-  function pushSyncIdentity(){
-    if (!ONESIGNAL_APP_ID || !state.currentUser) return;
-    window.OneSignalDeferred = window.OneSignalDeferred || [];
-    window.OneSignalDeferred.push(function(OneSignal){
-      OneSignal.login(state.currentUser.id).catch(function(){});
-      OneSignal.User.addTag("memberId", state.currentUser.id).catch(function(){});
-    });
-  }
-
-  function requestPushPermission(){
-    if (!ONESIGNAL_APP_ID){
-      alert("알림 기능이 아직 설정되지 않았어요.");
-      return;
-    }
-    window.OneSignalDeferred = window.OneSignalDeferred || [];
-    window.OneSignalDeferred.push(function(OneSignal){
-      OneSignal.Notifications.requestPermission();
-    });
-  }
-
-  // Best-effort push to every other subscribed device when someone checks in.
-  // Silently does nothing until ONESIGNAL_APP_ID/REST_API_KEY are filled in.
-  function notifyCheckin(name, memberId){
-    if (!ONESIGNAL_APP_ID || !ONESIGNAL_REST_API_KEY) return;
-    fetch("https://onesignal.com/api/v1/notifications", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Authorization": "Key " + ONESIGNAL_REST_API_KEY
-      },
-      body: JSON.stringify({
-        app_id: ONESIGNAL_APP_ID,
-        headings: { en: "운동 인증 완료 🏋️" },
-        contents: { en: name + "님이 방금 인증했어요!" },
-        filters: [
-          { field: "tag", key: "memberId", relation: "!=", value: memberId }
-        ]
-      })
-    }).catch(function(){ /* best-effort; ignore network errors */ });
   }
 
   /* ---------------- image capture + compression ---------------- */
@@ -756,7 +668,6 @@
     state.dataLayer.checkIn(memberId, memberName, photo).then(function(){
       state.uploading = false;
       state.tab = "board";
-      notifyCheckin(memberName, memberId);
       render();
     });
   }
@@ -764,6 +675,36 @@
   function cancelCheckin(){
     state.pendingPhoto = null;
     render();
+  }
+
+  function handleMealFileChosen(file){
+    if (!file || !state.pendingMealSlot) return;
+    var slot = state.pendingMealSlot;
+    compressImage(file).then(function(dataUrl){
+      state.pendingMeal = { slot: slot, photo: dataUrl };
+      state.pendingMealSlot = null;
+      render();
+    }).catch(function(){
+      state.pendingMealSlot = null;
+      render();
+    });
+  }
+
+  function cancelMealCheckin(){
+    state.pendingMeal = null;
+    render();
+  }
+
+  function confirmMealCheckin(){
+    if (!state.pendingMeal || !state.currentUser) return;
+    var slot = state.pendingMeal.slot;
+    var photo = state.pendingMeal.photo;
+    var memberId = state.currentUser.id;
+    var memberName = state.currentUser.name;
+    var dayKey = dayKeyOf(Date.now());
+    state.pendingMeal = null;
+    render();
+    state.dataLayer.addMeal(memberId, memberName, slot, photo, dayKey);
   }
 
   function requestDeleteMember(memberId, memberName){
@@ -831,7 +772,7 @@
     if (cutoff > firstOfThisMonth) cutoff = firstOfThisMonth; // never let cleanup reach into this month
     var count = state.checkins.filter(function(c){ return c.createdAt < cutoff; }).length;
     if (!count){ alert("선택한 날짜 이전 사진이 없어요."); return; }
-    if (!confirm(count + "장의 사진을 삭제할까요? 지난 달까지의 사진만 지워지고, 이미 확정된 지난 달 우승자 기록은 그대로 유지돼요. 되돌릴 수 없어요.")) return;
+    if (!confirm(count + "장의 사진을 삭제할까요? 지난 달까지의 사진만 지워져요. 되돌릴 수 없어요.")) return;
     state.cleaning = true;
     render();
     state.dataLayer.deleteCheckinsBefore(cutoff).then(function(deleted){
@@ -935,7 +876,6 @@
         '<div class="brand"><div class="eyebrow">Family Gym Log</div><h1>건강하게 살자</h1></div>' +
         '<div class="header-actions">' +
           '<button class="icon-btn" id="cleanupBtn" title="지난 사진 정리" aria-label="지난 사진 정리">🧹</button>' +
-          '<button class="icon-btn" id="notifyBtn" title="알림 켜기" aria-label="알림 켜기">🔔</button>' +
           '<button class="whoami" id="switchBtn"><span class="avatar">' + escapeHtml(initials(state.currentUser.name)) + '</span>' + escapeHtml(state.currentUser.name) + '</button>' +
         '</div>' +
       '</div>';
@@ -952,16 +892,17 @@
         '<button class="cta' + (checkedToday ? ' done-today' : '') + '" id="checkinBtn" ' + (ctaDisabled ? "disabled" : "") + '>' + ctaLabel + '</button>' +
         (checkedToday ? '<p class="cta-note">하루에 한 번만 인증할 수 있어요. 내일 다시 눌러주세요.</p>' : '') +
         '<input type="file" accept="image/*" id="fileInput" class="visually-hidden" />' +
+        '<input type="file" accept="image/*" id="mealFileInput" class="visually-hidden" />' +
       '</div>';
 
     var tabs = '' +
       '<div class="tabs">' +
         '<button class="tab' + (state.tab === "board" ? " active" : "") + '" data-tab="board">리더보드</button>' +
-        '<button class="tab' + (state.tab === "history" ? " active" : "") + '" data-tab="history">지난 기록</button>' +
+        '<button class="tab' + (state.tab === "meal" ? " active" : "") + '" data-tab="meal">식단인증</button>' +
         '<button class="tab' + (state.tab === "feed" ? " active" : "") + '" data-tab="feed">인증 사진</button>' +
       '</div>';
 
-    var body = state.tab === "board" ? renderBoard() : state.tab === "history" ? renderHistory() : renderFeed();
+    var body = state.tab === "board" ? renderBoard() : state.tab === "meal" ? renderMealTab() : renderFeed();
 
     var modals = "";
     if (state.pendingPhoto){
@@ -973,6 +914,20 @@
             '<div class="sheet-actions">' +
               '<button class="btn ghost" id="cancelCheckin">다시 찍기</button>' +
               '<button class="btn primary" id="confirmCheckin">인증 완료</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+    }
+    if (state.pendingMeal){
+      var slotInfo = MEAL_SLOTS.filter(function(s){ return s.key === state.pendingMeal.slot; })[0] || { label: "식단" };
+      modals += '' +
+        '<div class="overlay" id="mealConfirmOverlay">' +
+          '<div class="sheet">' +
+            '<h3>' + escapeHtml(slotInfo.label) + ' 식단을 인증할까요?</h3>' +
+            '<img class="sheet-photo" src="' + state.pendingMeal.photo + '" alt="식단 인증 사진 미리보기" />' +
+            '<div class="sheet-actions">' +
+              '<button class="btn ghost" id="mealCancelBtn">다시 선택</button>' +
+              '<button class="btn primary" id="mealConfirmBtn">인증 완료</button>' +
             '</div>' +
           '</div>' +
         '</div>';
@@ -991,7 +946,7 @@
         '<div class="overlay" id="cleanupOverlay">' +
           '<div class="sheet">' +
             '<h3>지난 사진 정리</h3>' +
-            '<p class="cleanup-note">이번 달 이전(지난 달까지) 인증사진만 정리할 수 있어요. 이번 달 순위에는 영향이 없고, 이미 확정된 지난 달 우승자 기록도 그대로 유지돼요. 삭제 후에는 되돌릴 수 없어요.</p>' +
+            '<p class="cleanup-note">이번 달 이전(지난 달까지) 인증사진만 정리할 수 있어요. 이번 달 순위에는 영향이 없어요. 삭제 후에는 되돌릴 수 없어요.</p>' +
             '<input type="date" class="cleanup-date" id="cleanupDateInput" max="' + escapeHtml(firstOfMonthStr()) + '" value="' + escapeHtml(state.cleanup.date) + '" />' +
             '<div class="cleanup-preview">' + willDelete + '장이 삭제돼요</div>' +
             '<div class="sheet-actions">' +
@@ -1006,7 +961,7 @@
         '<div class="overlay" id="deleteMemberOverlay">' +
           '<div class="sheet">' +
             '<h3>' + escapeHtml(state.deleteTarget.name) + '님을 삭제할까요?</h3>' +
-            '<p class="cleanup-note">이번 달 리더보드에서만 빠져요. 지난 기록과 인증 사진은 그대로 남아요. 다시 참여하려면 새 이름으로 등록해야 해요.</p>' +
+            '<p class="cleanup-note">이번 달 리더보드에서만 빠져요. 인증 사진과 식단 기록은 그대로 남아요. 다시 참여하려면 새 이름으로 등록해야 해요.</p>' +
             '<div class="sheet-actions">' +
               '<button class="btn ghost" id="deleteMemberCancel">취소</button>' +
               '<button class="btn danger" id="deleteMemberConfirm">삭제하기</button>' +
@@ -1046,36 +1001,36 @@
     return meta + list + hint;
   }
 
-  function renderHistory(){
-    if (!state.monthlyWinners.length){
-      return '<div class="empty">아직 지난 기록이 없어요.<br/>이번 달이 끝나면 1·2등이 여기에 기록돼요.</div>';
-    }
-    return state.monthlyWinners.map(function(entry){
-      var winners = (entry.winners || []).slice().sort(function(a,b){ return b.count - a.count; });
-      if (!winners.length) return "";
-      var firstCount = winners[0].count;
-      var firstGroup = winners.filter(function(w){ return w.count === firstCount; });
-      var secondGroup = winners.filter(function(w){ return w.count !== firstCount; });
+  function renderMealTab(){
+    if (!state.members.length) return '<div class="empty">아직 등록된 멤버가 없어요.</div>';
 
-      var totalDays = daysInMonthKey(entry.month);
-      function cardFor(w, isFirst, groupSize){
-        var rankClass = isFirst ? " r1" : " r2";
-        var medal = isFirst ? "🥇" : "🥈";
-        var note = groupSize > 1 ? '<span class="history-tie-note">공동 ' + (isFirst ? "1" : "2") + '위</span>' : "";
-        return '' +
-          '<div class="history-card">' +
-            '<div class="rank' + rankClass + '">' + medal + '</div>' +
-            '<div class="history-winner-name">' + escapeHtml(w.name) + '</div>' +
-            note +
-            '<div class="history-count">' + w.count + '/' + totalDays + '<small> 회</small></div>' +
-          '</div>';
-      }
+    var todayKey = dayKeyOf(Date.now());
+    var map = {};
+    state.meals.forEach(function(m){
+      if (m.dayKey === todayKey) map[m.memberId + "|" + m.slot] = m;
+    });
 
-      var cards = firstGroup.map(function(w){ return cardFor(w, true, firstGroup.length); }).join("") +
-        secondGroup.map(function(w){ return cardFor(w, false, secondGroup.length); }).join("");
+    var meta = '<div class="board-meta"><span>오늘의 식단 인증</span><span>총 ' + state.members.length + '명</span></div>';
 
-      return '<div class="history-month"><div class="history-month-label">' + monthLabel(entry.month) + '</div>' + cards + '</div>';
+    var cards = state.members.map(function(m){
+      var isMe = m.id === state.currentUser.id;
+      var slots = MEAL_SLOTS.map(function(s){
+        var meal = map[m.id + "|" + s.key];
+        var cell = meal
+          ? '<img class="meal-slot-photo" src="' + meal.photo + '" alt="' + escapeHtml(m.name) + ' ' + s.label + ' 인증 사진" data-lightbox="1" />'
+          : (isMe
+              ? '<div class="meal-slot-empty" data-meal-slot="' + s.key + '" role="button" aria-label="' + s.label + ' 사진 추가">+</div>'
+              : '<div class="meal-slot-empty locked">·</div>');
+        return '<div class="meal-slot">' + cell + '<span class="meal-slot-label">' + s.emoji + ' ' + s.label + '</span></div>';
+      }).join("");
+      return '' +
+        '<div class="meal-card">' +
+          '<div class="meal-member-name">' + escapeHtml(m.name) + (isMe ? '<span class="you-tag">나</span>' : '') + '</div>' +
+          '<div class="meal-slots">' + slots + '</div>' +
+        '</div>';
     }).join("");
+
+    return meta + cards;
   }
 
   function renderFeed(){
@@ -1117,6 +1072,23 @@
       fileInput.value = "";
     });
 
+    var mealFileInput = document.getElementById("mealFileInput");
+    if (mealFileInput) mealFileInput.addEventListener("change", function(){
+      var file = mealFileInput.files && mealFileInput.files[0];
+      handleMealFileChosen(file);
+      mealFileInput.value = "";
+    });
+    document.querySelectorAll("[data-meal-slot]").forEach(function(cell){
+      cell.addEventListener("click", function(){
+        state.pendingMealSlot = cell.getAttribute("data-meal-slot");
+        if (mealFileInput) mealFileInput.click();
+      });
+    });
+    var mealCancelBtn = document.getElementById("mealCancelBtn");
+    if (mealCancelBtn) mealCancelBtn.addEventListener("click", cancelMealCheckin);
+    var mealConfirmBtn = document.getElementById("mealConfirmBtn");
+    if (mealConfirmBtn) mealConfirmBtn.addEventListener("click", confirmMealCheckin);
+
     document.querySelectorAll("[data-tab]").forEach(function(btn){
       btn.addEventListener("click", function(){ state.tab = btn.getAttribute("data-tab"); render(); });
     });
@@ -1136,8 +1108,6 @@
 
     var cleanupBtn = document.getElementById("cleanupBtn");
     if (cleanupBtn) cleanupBtn.addEventListener("click", openCleanup);
-    var notifyBtn = document.getElementById("notifyBtn");
-    if (notifyBtn) notifyBtn.addEventListener("click", requestPushPermission);
     var cleanupDateInput = document.getElementById("cleanupDateInput");
     if (cleanupDateInput) cleanupDateInput.addEventListener("change", function(){
       state.cleanup.date = cleanupDateInput.value;
